@@ -28,7 +28,6 @@ namespace arrow {
 
 using internal::BitBlockCount;
 using internal::BitBlockCounter;
-
 namespace compute {
 namespace internal {
 
@@ -36,6 +35,100 @@ namespace {
 
 template <typename Type, typename Enable = void>
 struct FillNullFunctor {};
+
+template <typename Type>
+struct FillNullFunctor<Type, enable_if_t<is_string_like_type<Type>::value>> {
+  using ArrayType = typename TypeTraits<Type>::ArrayType;
+  using ScalarType = typename TypeTraits<Type>::ScalarType;
+  using offset_type = typename Type::offset_type;
+
+  static void Exec(KernelContext* ctx, const ExecBatch& batch, Datum* out) {
+    const ArrayData& data = *batch[0].array();
+    const Scalar& fill_value = *batch[1].scalar();
+    ArrayData* output = out->mutable_array();
+    ArrayType input_boxed(batch[0].array());
+    const auto& scalar_boxed = batch[1].scalar_as<ScalarType>();
+
+    // Ensure the kernel is configured properly to have no validity bitmap /
+    // null count 0 unless we explicitly propagate it below.
+    DCHECK(output->buffers[0] == nullptr);
+
+    // auto value = UnboxScalar<Type>::Unbox(fill_value);
+    if (data.MayHaveNulls() != 0 && fill_value.is_valid) {
+      KERNEL_ASSIGN_OR_RAISE(
+          std::shared_ptr<Buffer> out_value_buf, ctx,
+          ctx->Allocate(data.buffers[2]->size() +
+                        (data.GetNullCount() * scalar_boxed.value->size())));
+      KERNEL_ASSIGN_OR_RAISE(std::shared_ptr<Buffer> out_offset_buf, ctx,
+                             ctx->Allocate(data.buffers[1]->size() +
+                                           (data.GetNullCount() * sizeof(offset_type))));
+      // offset = 1
+      // value = 2
+      const uint8_t* fill_value = scalar_boxed.value->data();
+      const uint8_t* is_valid = data.buffers[0]->data();
+      const offset_type* in_offsets =
+          reinterpret_cast<const offset_type*>(data.buffers[1]->data());
+      const uint8_t* in_values = data.buffers[2]->data();
+      uint8_t* out_values = out_value_buf->mutable_data();
+      offset_type* out_offsets =
+          reinterpret_cast<offset_type*>(out_offset_buf->mutable_data());
+      int64_t in_offset = data.offset;
+      int64_t out_offset = out_offsets[0] = 0;
+      BitBlockCounter bit_counter(is_valid, data.offset, data.length);
+      while (in_offset < data.offset + data.length) {
+        // initialise our first in_offset
+        BitBlockCount block = bit_counter.NextWord();
+        if (block.AllSet()) {
+          // Block all not null
+          std::memcpy(out_values + out_offsets[out_offset],
+                      in_values + in_offsets[in_offset],
+                      in_offsets[in_offset + block.length] - in_offsets[in_offset]);
+
+          for (int64_t i = 0; i < block.length; ++i) {
+            // new offset
+            out_offsets[out_offset + i + 1] =
+                out_offsets[out_offset + i] +
+                (in_offsets[in_offset + i + 1] - in_offsets[in_offset + i]);
+          }
+        } else if (block.NoneSet()) {
+          // Block all null
+          for (int64_t i = 0; i < block.length; ++i) {
+            std::memcpy(out_values + out_offsets[out_offset + i], fill_value,
+                        scalar_boxed.value->size());
+            // new offset
+            out_offsets[out_offset + i + 1] =
+                out_offsets[out_offset + i] + scalar_boxed.value->size();
+          }
+        } else {
+          for (int64_t i = 0; i < block.length; ++i) {
+            // some nulls
+            if (BitUtil::GetBit(is_valid, in_offset + i)) {
+              std::memcpy(out_values + out_offsets[out_offset + i],
+                          in_values + in_offsets[in_offset + i],
+                          in_offsets[in_offset + i + 1] - in_offsets[in_offset + i]);
+              // new offset
+              out_offsets[out_offset + i + 1] =
+                  (in_offsets[in_offset + i + 1] - in_offsets[in_offset + i]) +
+                  out_offsets[out_offset + i];
+            } else {
+              std::memcpy(out_values + out_offsets[out_offset + i], fill_value,
+                          scalar_boxed.value->size());
+              // new offset
+              out_offsets[out_offset + i + 1] =
+                  scalar_boxed.value->size() + out_offsets[out_offset + i];
+            }
+          }
+        }
+        in_offset += block.length;
+        out_offset += block.length;
+      }
+      output->buffers[1] = out_offset_buf;
+      output->buffers[2] = out_value_buf;
+    } else {
+      *output = data;
+    }
+  }
+};
 
 template <typename Type>
 struct FillNullFunctor<Type, enable_if_t<is_number_type<Type>::value>> {
@@ -151,6 +244,7 @@ void AddBasicFillNullKernels(ScalarKernel kernel, ScalarFunction* func) {
   AddKernels(NumericTypes());
   AddKernels(TemporalTypes());
   AddKernels({boolean(), null()});
+  AddKernels({utf8()});
 }
 
 }  // namespace

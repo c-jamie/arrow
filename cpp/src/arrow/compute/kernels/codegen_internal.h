@@ -886,6 +886,8 @@ ArrayKernelExec GenerateTypeAgnosticPrimitive(detail::GetTypeId get_id) {
     case Type::TIME64:
     case Type::DURATION:
       return Generator<UInt64Type>::Exec;
+    case Type::STRING:
+      return Generator<StringType>::Exec;
     default:
       DCHECK(false);
       return ExecFail;

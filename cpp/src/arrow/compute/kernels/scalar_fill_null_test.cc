@@ -145,13 +145,50 @@ TEST_F(TestFillNullKernel, FillNullTimeStamp) {
   auto time32_type = time32(TimeUnit::SECOND);
   auto time64_type = time64(TimeUnit::NANO);
   auto scalar1 = std::make_shared<Time32Scalar>(5, time32_type);
-  auto scalar2 = std::make_shared<Time64Scalar>(6, time64_type);
-  // no nulls
+  auto scalar2 = std::make_shared<Time64Scalar>(6, time64_type);  // no nulls
   CheckFillNull(time32_type, "[2, 1, 6, 9]", Datum(scalar1), "[2, 1, 6, 9]");
   CheckFillNull(time64_type, "[2, 1, 6, 9]", Datum(scalar2), "[2, 1, 6, 9]");
   // some nulls
   CheckFillNull(time32_type, "[2, 1, 6, null]", Datum(scalar1), "[2, 1, 6, 5]");
   CheckFillNull(time64_type, "[2, 1, 6, null]", Datum(scalar2), "[2, 1, 6, 6]");
+}
+
+TEST_F(TestFillNullKernel, FillNullString) {
+  auto scalar1 = std::make_shared<StringScalar>("update٣");
+  auto scalar2 = std::make_shared<StringScalar>("update"); 
+  // no nulls
+  // CheckFillNull(utf8(), R"(["ababÆ", "ab", null, "ccc"])",
+  //               Datum(scalar1),
+  //               R"(["ababÆ", "ab", "update٣", "ccc"])");
+
+  const int64_t array_length = 130;
+  const int64_t value_min_size = 0;
+  const int64_t value_max_size = 2;
+  const double null_probability = 0.03;
+  random::RandomArrayGenerator rng(0);
+
+  // NOTE: this produces only-Ascii data
+  auto values =
+    rng.String(array_length, value_min_size, value_max_size, null_probability);
+  auto str_arr = std::static_pointer_cast<StringArray>(values);
+  
+  StringBuilder builder;
+
+  for (int64_t i=0; i < str_arr->length(); ++i) {
+    if (values->IsValid(i)) {
+      ASSERT_OK(builder.Append(str_arr->GetString(i)));
+    } else {
+      ASSERT_OK(builder.Append(scalar1->value->data(), scalar1->value->size()));
+    }
+  }
+  std::shared_ptr<Array> output_array;
+  ASSERT_OK(builder.Finish(&output_array));
+
+  CheckFillNull(*values,
+                Datum(scalar1),
+                *output_array);
+  // some nulls
+  // CheckFillNull(StringType, "[2, 1, 6, null]", Datum(scalar1), "[2, 1, 6, 5]");
 }
 
 }  // namespace compute
